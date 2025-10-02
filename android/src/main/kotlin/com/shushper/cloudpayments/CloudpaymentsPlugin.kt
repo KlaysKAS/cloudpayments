@@ -3,7 +3,6 @@ package com.shushper.cloudpayments
 import android.app.Activity.RESULT_CANCELED
 import android.app.Activity.RESULT_OK
 import android.content.Intent
-import android.util.Log
 import androidx.annotation.NonNull
 import com.google.android.gms.common.api.ApiException
 import com.google.android.gms.wallet.*
@@ -19,8 +18,7 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
-import io.flutter.plugin.common.PluginRegistry
-import io.flutter.plugin.common.PluginRegistry.Registrar
+import io.flutter.plugin.common.PluginRegistry.ActivityResultListener
 import java.io.UnsupportedEncodingException
 import java.security.InvalidKeyException
 import java.security.NoSuchAlgorithmException
@@ -31,17 +29,12 @@ import javax.crypto.NoSuchPaddingException
 const val LOAD_PAYMENT_DATA_REQUEST_CODE = 991
 
 /** CloudpaymentsPlugin */
-class CloudpaymentsPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, PluginRegistry.ActivityResultListener {
-    /// The MethodChannel that will the communication between Flutter and native Android
-    ///
-    /// This local reference serves to register the plugin with the Flutter Engine and unregister it
-    /// when the Flutter Engine is detached from the Activity
+class CloudpaymentsPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, ActivityResultListener {
+
     private lateinit var channel: MethodChannel
     private var activity: FlutterFragmentActivity? = null
     private var binding: ActivityPluginBinding? = null
-
     private var paymentsClient: PaymentsClient? = null
-
     private var lastPaymentResult: Result? = null
 
     override fun onAttachedToEngine(@NonNull flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
@@ -64,37 +57,20 @@ class CloudpaymentsPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, Plu
         this.paymentsClient = null
         binding?.removeActivityResultListener(this)
         binding = null
+        lastPaymentResult = null
     }
 
     override fun onDetachedFromActivityForConfigChanges() {
         this.activity = null
         binding?.removeActivityResultListener(this)
         binding = null
+        lastPaymentResult = null
     }
 
     override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {
         this.activity = binding.activity as? FlutterFragmentActivity
         this.binding = binding
         binding.addActivityResultListener(this)
-    }
-
-    // This static function is optional and equivalent to onAttachedToEngine. It supports the old
-    // pre-Flutter-1.12 Android projects. You are encouraged to continue supporting
-    // plugin registration via this function while apps migrate to use the new Android APIs
-    // post-flutter-1.12 via https://flutter.dev/go/android-project-migration.
-    //
-    // It is encouraged to share logic between onAttachedToEngine and registerWith to keep
-    // them functionally equivalent. Only one of onAttachedToEngine or registerWith will be called
-    // depending on the user's project. onAttachedToEngine or registerWith must both be defined
-    // in the same class.
-    companion object {
-        @JvmStatic
-        fun registerWith(registrar: Registrar) {
-            val channel = MethodChannel(registrar.messenger(), "cloudpayments")
-            val plugin = CloudpaymentsPlugin()
-            channel.setMethodCallHandler(plugin)
-            registrar.addActivityResultListener(plugin)
-        }
     }
 
     override fun onMethodCall(@NonNull call: MethodCall, @NonNull result: Result) {
@@ -128,7 +104,6 @@ class CloudpaymentsPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, Plu
             }
         }
     }
-
 
     private fun isValidNumber(call: MethodCall): Boolean {
         val params = call.arguments as Map<String, Any>
@@ -187,13 +162,13 @@ class CloudpaymentsPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, Plu
         val transactionId = params["transactionId"] as String
         val paReq = params["paReq"] as String
 
-        activity?.let {
+        activity?.let { activity ->
             val dialog = ThreeDsDialogFragment.newInstance(
-                    acsUrl,
-                    transactionId,
-                    paReq
+                acsUrl,
+                transactionId,
+                paReq
             )
-            dialog.show(it.supportFragmentManager, "3DS")
+            dialog.show(activity.supportFragmentManager, "3DS")
 
             dialog.setListener(object : ThreeDSDialogListener {
                 override fun onAuthorizationCompleted(md: String, paRes: String) {
@@ -208,6 +183,8 @@ class CloudpaymentsPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, Plu
                     result.success(null)
                 }
             })
+        } ?: run {
+            result.error("ActivityError", "No activity available", null)
         }
     }
 
@@ -228,7 +205,6 @@ class CloudpaymentsPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, Plu
         } else {
             result.error("GooglePayError", "Couldn't create Payments Client", null)
         }
-
     }
 
     private fun checkIsGooglePayAvailable(call: MethodCall, result: Result) {
@@ -253,6 +229,8 @@ class CloudpaymentsPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, Plu
             } catch (exception: ApiException) {
                 result.error("GooglePayError", exception.message, null)
             }
+        } ?: run {
+            result.error("GooglePayError", "Payments client not initialized", null)
         }
     }
 
@@ -277,6 +255,9 @@ class CloudpaymentsPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, Plu
 
         if (request != null && paymentsClient != null && activity != null) {
             AutoResolveHelper.resolveTask(paymentsClient.loadPaymentData(request), activity, LOAD_PAYMENT_DATA_REQUEST_CODE)
+        } else {
+            result.error("RequestPayment", "Payments client or activity not available", null)
+            lastPaymentResult = null
         }
     }
 
@@ -285,13 +266,10 @@ class CloudpaymentsPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, Plu
             when (resultCode) {
                 RESULT_OK -> {
                     onPaymentOk(data)
-
                 }
-
                 RESULT_CANCELED -> {
                     onPaymentCanceled()
                 }
-
                 AutoResolveHelper.RESULT_ERROR -> {
                     onPaymentError(data)
                 }
@@ -313,8 +291,8 @@ class CloudpaymentsPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, Plu
                 val paymentInfo: String = paymentData.toJson()
 
                 lastPaymentResult?.success(mapOf(
-                        "status" to "SUCCESS",
-                        "result" to paymentInfo
+                    "status" to "SUCCESS",
+                    "result" to paymentInfo
                 ))
             }
         }
@@ -323,9 +301,8 @@ class CloudpaymentsPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, Plu
 
     private fun onPaymentCanceled() {
         lastPaymentResult?.success(mapOf(
-                "status" to "CANCELED"
+            "status" to "CANCELED"
         ))
-
         lastPaymentResult = null
     }
 
@@ -338,10 +315,10 @@ class CloudpaymentsPlugin : FlutterPlugin, MethodCallHandler, ActivityAware, Plu
                 lastPaymentResult?.error("RequestPayment", "Status is null", null)
             } else {
                 lastPaymentResult?.success(mapOf(
-                        "status" to "ERROR",
-                        "error_code" to status.statusCode,
-                        "error_message" to status.statusMessage,
-                        "error_description" to status.toString()
+                    "status" to "ERROR",
+                    "error_code" to status.statusCode,
+                    "error_message" to status.statusMessage,
+                    "error_description" to status.toString()
                 ))
             }
         }
